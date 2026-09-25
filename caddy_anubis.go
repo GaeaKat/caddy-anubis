@@ -1,6 +1,7 @@
 package caddyanubis
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -32,7 +33,7 @@ type AnubisMiddleware struct {
 // CaddyModule returns the Caddy module information.
 func (AnubisMiddleware) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.anubis",
+		ID: "http.handlers.anubis",
 		New: func() caddy.Module { return new(AnubisMiddleware) },
 	}
 }
@@ -42,7 +43,13 @@ func (m *AnubisMiddleware) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger().Named("anubis")
 	m.logger.Info("Anubis middleware provisioning")
 
-	policy, err := libanubis.LoadPoliciesOrDefault("", anubis.DefaultDifficulty)
+	policy, err := libanubis.LoadPoliciesOrDefault(
+		context.Background(),
+		"",
+		anubis.DefaultDifficulty,
+		"info",
+		true,
+	)
 	if err != nil {
 		return err
 	}
