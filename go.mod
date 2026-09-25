@@ -1,4 +1,4 @@
-module github.com/daegalus/caddy-anubis
+module github.com/GaeaKat/caddy-anubis
 
 go 1.26.3
 
