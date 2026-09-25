@@ -102,7 +102,13 @@ func (m *AnubisMiddleware) ServeHTTP(
 	r *http.Request,
 	next caddyhttp.Handler,
 ) error {
-	m.logger.Info("Anubis middleware processing request")
+	m.logger.Info(
+    "Anubis middleware processing request",
+    zap.String("method", r.Method),
+    zap.String("path", r.URL.Path),
+    zap.String("query", r.URL.RawQuery),
+    zap.String("cookie", r.Header.Get("Cookie")),
+)
 
 	// Always overwrite X-Real-IP so a client cannot spoof it.
 	//
