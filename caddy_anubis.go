@@ -2,7 +2,6 @@ package caddyanubis
 
 import (
 	"context"
-	"log/slog"
 	"net"
 	"net/http"
 
@@ -16,6 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
+type nextHandlerKey struct{}
+
 func init() {
 	caddy.RegisterModule(AnubisMiddleware{})
 	httpcaddyfile.RegisterHandlerDirective("anubis", parseCaddyfile)
@@ -23,14 +24,13 @@ func init() {
 }
 
 type AnubisMiddleware struct {
-	Target       *string `json:"target,omitempty"`
+	Target       *string             `json:"target,omitempty"`
 	AnubisPolicy *policy.ParsedConfig
 	AnubisServer *libanubis.Server
 
 	logger *zap.Logger
 }
 
-// CaddyModule returns the Caddy module information.
 func (AnubisMiddleware) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID: "http.handlers.anubis",
@@ -40,7 +40,6 @@ func (AnubisMiddleware) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision implements caddy.Provisioner.
 func (m *AnubisMiddleware) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger().Named("anubis")
 	m.logger.Info("Anubis middleware provisioning")
@@ -58,56 +57,18 @@ func (m *AnubisMiddleware) Provision(ctx caddy.Context) error {
 
 	m.AnubisPolicy = p
 
-	// We deliberately don't set Next here.
-	//
-	// The actual Caddy next handler is request-specific and is supplied
-	// when ServeHTTP is called. Keeping it on the module would introduce
-	// a data race between simultaneous requests.
-	m.logger.Info("Anubis middleware provisioned")
-
-	return nil
-}
-
-// Validate implements caddy.Validator.
-func (m *AnubisMiddleware) Validate() error {
-	return nil
-}
-
-// ServeHTTP implements caddyhttp.MiddlewareHandler.
-func (m *AnubisMiddleware) ServeHTTP(
-	w http.ResponseWriter,
-	r *http.Request,
-	next caddyhttp.Handler,
-) error {
-	m.logger.Info("Anubis middleware processing request")
-
-	// Anubis v1.27 expects X-Real-IP to be present.
-	//
-	// At the moment Caddy is directly exposed to the Internet, so
-	// RemoteAddr is the actual client connection. SplitHostPort removes
-	// the ephemeral source port and also handles IPv6 correctly.
-	if r.Header.Get("X-Real-IP") == "" {
-		clientIP := r.RemoteAddr
-
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			clientIP = host
-		}
-
-		r.Header.Set("X-Real-IP", clientIP)
-	}
-
-	m.logger.Info(
-		"Anubis middleware sending request",
-		"remote_addr", r.RemoteAddr,
-		"x_real_ip", r.Header.Get("X-Real-IP"),
-	)
-
-	// The Anubis library calls Next when the request passes the
-	// challenge/policy checks. Capture this request's Caddy handler in
-	// the closure rather than storing it on the shared middleware object.
-	anubisServer, err := libanubis.New(libanubis.Options{
+	m.AnubisServer, err = libanubis.New(libanubis.Options{
 		Next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			m.logger.Info("Anubis middleware calling next")
+			next, ok := r.Context().Value(nextHandlerKey{}).(caddyhttp.Handler)
+			if !ok || next == nil {
+				m.logger.Error("Anubis could not find Caddy next handler")
+				http.Error(
+					w,
+					"Anubis middleware is misconfigured",
+					http.StatusInternalServerError,
+				)
+				return
+			}
 
 			if m.Target != nil {
 				http.Redirect(w, r, *m.Target, http.StatusTemporaryRedirect)
@@ -117,7 +78,7 @@ func (m *AnubisMiddleware) ServeHTTP(
 			if err := next.ServeHTTP(w, r); err != nil {
 				m.logger.Error(
 					"next handler returned an error",
-					"error", err,
+					zap.Error(err),
 				)
 			}
 		}),
@@ -128,12 +89,49 @@ func (m *AnubisMiddleware) ServeHTTP(
 		return err
 	}
 
-	anubisServer.ServeHTTP(w, r)
+	m.logger.Info("Anubis middleware provisioned")
+	return nil
+}
+
+func (m *AnubisMiddleware) Validate() error {
+	return nil
+}
+
+func (m *AnubisMiddleware) ServeHTTP(
+	w http.ResponseWriter,
+	r *http.Request,
+	next caddyhttp.Handler,
+) error {
+	m.logger.Info("Anubis middleware processing request")
+
+	// Always overwrite X-Real-IP so a client cannot spoof it.
+	//
+	// When directly connected, RemoteAddr is the client.
+	// When Caddy is configured with trusted proxies (e.g. Cloudflare),
+	// Caddy's RemoteAddr/client handling can be used here accordingly.
+	clientIP := r.RemoteAddr
+
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		clientIP = host
+	}
+
+	r.Header.Set("X-Real-IP", clientIP)
+
+	m.logger.Info(
+		"Anubis middleware sending request",
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("x_real_ip", clientIP),
+	)
+
+	r = r.WithContext(
+		context.WithValue(r.Context(), nextHandlerKey{}, next),
+	)
+
+	m.AnubisServer.ServeHTTP(w, r)
 
 	return nil
 }
 
-// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (m *AnubisMiddleware) UnmarshalCaddyfile(
 	d *caddyfile.Dispenser,
 ) error {
@@ -152,7 +150,6 @@ func (m *AnubisMiddleware) UnmarshalCaddyfile(
 	return nil
 }
 
-// parseCaddyfile unmarshals tokens from h into a new Middleware.
 func parseCaddyfile(
 	h httpcaddyfile.Helper,
 ) (caddyhttp.MiddlewareHandler, error) {
@@ -162,10 +159,9 @@ func parseCaddyfile(
 	return &m, err
 }
 
-// Interface guards.
 var (
-	_ caddy.Provisioner           = (*AnubisMiddleware)(nil)
-	_ caddy.Validator             = (*AnubisMiddleware)(nil)
+	_ caddy.Provisioner         = (*AnubisMiddleware)(nil)
+	_ caddy.Validator           = (*AnubisMiddleware)(nil)
 	_ caddyhttp.MiddlewareHandler = (*AnubisMiddleware)(nil)
-	_ caddyfile.Unmarshaler       = (*AnubisMiddleware)(nil)
+	_ caddyfile.Unmarshaler      = (*AnubisMiddleware)(nil)
 )
