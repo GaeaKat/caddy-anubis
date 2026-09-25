@@ -84,6 +84,9 @@ func (m *AnubisMiddleware) Provision(ctx caddy.Context) error {
 		}),
 		Policy:         m.AnubisPolicy,
 		ServeRobotsTXT: true,
+		CookieExpiration:  anubis.CookieDefaultExpirationTime,
+    	CookieSecure:      true,
+    	CookieSameSite:    http.SameSiteNoneMode,
 	})
 	if err != nil {
 		return err
